@@ -13,7 +13,7 @@
   },
   "tracking": {
     "confidence_threshold": 0.3,
-    "dead_zone_width": 0.2,
+    "dead_zone_width": 0.4,
     "dead_zone_height": 0.45,
     "smoothing_factor": 0.2,
     "lost_tracking_timeout": 2.0,
@@ -33,7 +33,6 @@
     "max_tilt_angle": 20,
     "min_tilt_angle": -90,
     "invert_pan": false,
-    "default_preset": 1,
     "movement_threshold": 0.1,
     "continuous_move": true,
     "home_position": {
@@ -56,11 +55,11 @@
   "system": {
     "debug": true,
     "log_level": "INFO",
-    "fps_limit": 25,
-    "frame_skip": 1,
+    "fps_limit": 30,
+    "frame_skip": 0,
     "performance_mode": true,
     "use_hardware_acceleration": true,
     "rtsp_buffer_size": 1,
-    "rtsp_timeout": 5000
+    "rtsp_timeout": 3000
   }
 }

@@ -56,16 +56,18 @@ class LatencyOptimizedCapture:
         while self.running and self.capture:
             ret, frame = self.capture.read()
             if ret:
-                # Clear queue and add latest frame
-                while not self.frame_queue.empty():
-                    try:
-                        self.frame_queue.get_nowait()
-                    except Empty:
-                        break
+                # Keep only the absolute latest frame to minimize latency
+                self.latest_frame = frame
                 
+                # Clear the queue and put the latest frame
                 try:
+                    # Remove any stale frames
+                    while not self.frame_queue.empty():
+                        self.frame_queue.get_nowait()
+                    # Add the fresh frame
                     self.frame_queue.put_nowait(frame)
-                    self.latest_frame = frame
+                except Exception:
+                    pass
                 except:
                     pass  # Queue full, skip frame
     
@@ -127,7 +129,7 @@ class PTZTrackingSystem:
         
         # Movement control
         self.last_movement_time = 0
-        self.movement_cooldown = 0.5  # Reduced from 3.0 to 0.5 seconds for more responsive movement
+        self.movement_cooldown = 0.1  # Reduced to 0.1 seconds for very responsive movement
         self.is_camera_moving = False  # Track if camera is currently moving
         self.dead_zone_width = config.get('tracking', {}).get('dead_zone_width', 0.2)
         
@@ -141,6 +143,10 @@ class PTZTrackingSystem:
         # Remember last position for quick re-locking
         self.last_primary_position = None
         self.last_primary_id = None
+        
+        # Movement direction control
+        self.current_direction = None
+        self.direction_change_cooldown = 0.3  # Reduced from 1.0 for faster direction changes
         
     async def initialize(self):
         """Initialize all components"""
@@ -278,13 +284,21 @@ class PTZTrackingSystem:
             
             self.logger.debug(f"Person at x={person_x:.3f}, dead_zone={not horizontal_dead_zone}")
             
+            # Safety check: stop if camera has been moving too long
+            if self.is_camera_moving and current_time - self.last_movement_time > 1.5:  # Reduced from 3.0
+                asyncio.create_task(self.ptz_controller.stop_movement())
+                self.is_camera_moving = False
+                self.current_direction = None
+                self.logger.warning("Camera moving too long - stopping for safety")
+                return
+            
             if horizontal_dead_zone:
                 # Use continuous movement based on which side of center person is on
                 center_x = 0.5
                 offset_from_center = person_x - center_x
                 
                 # Only move if person is significantly off-center
-                if abs(offset_from_center) > 0.03:  # 3% of frame width
+                if abs(offset_from_center) > 0.05:  # 5% of frame width - increased threshold
                     # Determine movement direction
                     if offset_from_center > 0:
                         # Person is on right side, need to pan right
@@ -294,15 +308,12 @@ class PTZTrackingSystem:
                         desired_direction = "left"
                     
                     # Check if we need to start movement or change direction
-                    if not self.is_camera_moving or getattr(self, 'current_direction', None) != desired_direction:
-                        # Stop any current movement first
-                        if self.is_camera_moving:
-                            asyncio.create_task(self.ptz_controller.stop_movement())
-                            # Brief pause handled by the movement command timing
-                        
-                        # Start movement in new direction
-                        # Use slower speed for smoother movement
-                        movement_speed = 0.05  # Very slow continuous movement
+                    current_direction_attr = getattr(self, 'current_direction', None)
+                    direction_change_time = getattr(self, 'last_direction_change', 0)
+                    
+                    if not self.is_camera_moving:
+                        # Camera not moving, start movement
+                        movement_speed = 0.03  # Even slower continuous movement
                         
                         if desired_direction == "right":
                             asyncio.create_task(self.ptz_controller.pan_right(movement_speed))
@@ -312,26 +323,41 @@ class PTZTrackingSystem:
                         self.is_camera_moving = True
                         self.current_direction = desired_direction
                         self.last_movement_time = current_time
+                        self.last_direction_change = current_time
                         self.logger.info(f"Starting continuous pan {desired_direction} at speed {movement_speed:.3f} (person at x={person_x:.3f})")
+                    
+                    elif current_direction_attr != desired_direction and (current_time - direction_change_time) > self.direction_change_cooldown:
+                        # Need to change direction, but only if enough time has passed
+                        asyncio.create_task(self.ptz_controller.stop_movement())
+                        
+                        movement_speed = 0.03
+                        if desired_direction == "right":
+                            asyncio.create_task(self.ptz_controller.pan_right(movement_speed))
+                        else:
+                            asyncio.create_task(self.ptz_controller.pan_left(movement_speed))
+                        
+                        self.current_direction = desired_direction
+                        self.last_direction_change = current_time
+                        self.logger.info(f"Changed direction to {desired_direction} (person at x={person_x:.3f})")
                     
                     # Update last movement time to prevent timeout
                     self.last_movement_time = current_time
                 else:
-                    # Person is close to center but still outside dead zone
+                    # Person is close to center - stop movement
                     if self.is_camera_moving:
                         asyncio.create_task(self.ptz_controller.stop_movement())
                         self.is_camera_moving = False
                         self.current_direction = None
                         self.logger.info(f"Stopping - person close to center at x={person_x:.3f}")
             else:
-                # Person is in dead zone - stop any ongoing movement
+                # Person is in dead zone - ALWAYS stop movement
                 if self.is_camera_moving:
                     asyncio.create_task(self.ptz_controller.stop_movement())
                     self.is_camera_moving = False
                     self.current_direction = None
                     self.logger.info(f"Person in dead zone - stopping camera movement")
                 else:
-                    self.logger.debug(f"Person in dead zone, no movement needed")
+                    self.logger.debug(f"Person in dead zone, camera already stopped")
     
     def is_in_vertical_dead_zone(self, y_normalized: float) -> bool:
         """Check if Y position is in the vertical center dead zone"""
@@ -341,22 +367,6 @@ class PTZTrackingSystem:
         dead_zone_bottom = center_y + (dead_zone_height / 2)
         
         return dead_zone_top <= y_normalized <= dead_zone_bottom
-    
-    async def move_camera_relative(self, direction: str, speed: float):
-        """Move camera in relative direction"""
-        if direction == "left":
-            await self.ptz_controller.pan_left(speed)
-        elif direction == "right":
-            await self.ptz_controller.pan_right(speed)
-        
-        # Schedule automatic stop after short duration
-        asyncio.create_task(self.auto_stop_movement(0.15))  # Much shorter movement pulses
-    
-    async def auto_stop_movement(self, delay: float):
-        """Automatically stop movement after delay"""
-        await asyncio.sleep(delay)
-        await self.ptz_controller.stop_movement()
-        self.is_camera_moving = False
     
     async def run(self):
         """Main tracking loop"""

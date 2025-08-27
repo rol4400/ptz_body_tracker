@@ -80,8 +80,7 @@ class PTZController:
                 self.connected = True
                 self.logger.info(f"[OK] Connected to VISCA camera at {self.ip}:{self.port}")
                 
-                # Get initial position
-                await self.get_current_position()
+                # Don't get initial position or go to home - just connect
                 return True
             else:
                 self.logger.error("Camera not responding to VISCA commands")
