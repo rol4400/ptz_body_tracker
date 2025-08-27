@@ -1,0 +1,63 @@
+{
+  "camera": {
+    "ip": "192.168.0.251",
+    "port": 80,
+    "username": "admin",
+    "password": "admin",
+    "stream_url": "rtsp://192.168.0.251:554/stream1",
+    "onvif_port": 80,
+    "soap_timeout": 5,
+    "connection_timeout": 10,
+    "use_digest_auth": true,
+    "rtsp_transport": "tcp"
+  },
+  "tracking": {
+    "confidence_threshold": 0.6,
+    "dead_zone_width": 0.25,
+    "dead_zone_height": 0.35,
+    "smoothing_factor": 0.2,
+    "lost_tracking_timeout": 2.0,
+    "min_detection_size": 0.08,
+    "max_people": 3,
+    "lock_distance_threshold": 0.15,
+    "track_buffer_frames": 60,
+    "min_track_hits": 1,
+    "iou_threshold": 0.2
+  },
+  "ptz": {
+    "pan_speed": 0.4,
+    "tilt_speed": 0.3,
+    "zoom_speed": 0.2,
+    "max_pan_angle": 170,
+    "min_pan_angle": -170,
+    "max_tilt_angle": 20,
+    "min_tilt_angle": -90,
+    "default_preset": 1,
+    "movement_threshold": 0.05,
+    "continuous_move": true,
+    "home_position": {
+      "pan": 0,
+      "tilt": 0,
+      "zoom": 0
+    }
+  },
+  "api": {
+    "host": "127.0.0.1",
+    "port": 8080,
+    "enable_cors": true
+  },
+  "osc": {
+    "host": "127.0.0.1",
+    "port": 8081,
+    "client_host": "127.0.0.1",
+    "client_port": 8082
+  },
+  "system": {
+    "debug": true,
+    "log_level": "INFO",
+    "fps_limit": 25,
+    "frame_skip": 1,
+    "performance_mode": true,
+    "use_hardware_acceleration": true
+  }
+}
