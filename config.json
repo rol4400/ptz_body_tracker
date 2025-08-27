@@ -12,12 +12,12 @@
     "rtsp_transport": "tcp"
   },
   "tracking": {
-    "confidence_threshold": 0.6,
-    "dead_zone_width": 0.25,
-    "dead_zone_height": 0.35,
+    "confidence_threshold": 0.3,
+    "dead_zone_width": 0.2,
+    "dead_zone_height": 0.45,
     "smoothing_factor": 0.2,
     "lost_tracking_timeout": 2.0,
-    "min_detection_size": 0.08,
+    "min_detection_size": 0.02,
     "max_people": 3,
     "lock_distance_threshold": 0.15,
     "track_buffer_frames": 60,
@@ -25,15 +25,16 @@
     "iou_threshold": 0.2
   },
   "ptz": {
-    "pan_speed": 0.4,
+    "pan_speed": 0.15,
     "tilt_speed": 0.3,
     "zoom_speed": 0.2,
     "max_pan_angle": 170,
     "min_pan_angle": -170,
     "max_tilt_angle": 20,
     "min_tilt_angle": -90,
+    "invert_pan": false,
     "default_preset": 1,
-    "movement_threshold": 0.05,
+    "movement_threshold": 0.1,
     "continuous_move": true,
     "home_position": {
       "pan": 0,
@@ -58,6 +59,8 @@
     "fps_limit": 25,
     "frame_skip": 1,
     "performance_mode": true,
-    "use_hardware_acceleration": true
+    "use_hardware_acceleration": true,
+    "rtsp_buffer_size": 1,
+    "rtsp_timeout": 5000
   }
 }

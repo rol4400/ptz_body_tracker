@@ -78,7 +78,7 @@ class PTZController:
             
             if connection_ok:
                 self.connected = True
-                self.logger.info(f"✓ Connected to VISCA camera at {self.ip}:{self.port}")
+                self.logger.info(f"[OK] Connected to VISCA camera at {self.ip}:{self.port}")
                 
                 # Get initial position
                 await self.get_current_position()
@@ -190,14 +190,18 @@ class PTZController:
         
         return (self.current_pan, self.current_tilt, self.current_zoom)
     
-    async def move_to_position(self, pan: float, tilt: Optional[float] = None, zoom: Optional[float] = None, speed: Optional[float] = None):
+    async def move_to_position(self, pan: float, tilt: Optional[float] = None, zoom: Optional[float] = None, speed: Optional[float] = None, pan_only: bool = False):
         """Move to absolute position"""
         async with self.movement_lock:
             if not self.connected:
                 return
             
-            if tilt is None:
+            # If pan_only is True, keep current tilt position and don't send tilt commands
+            if pan_only:
                 tilt = self.current_tilt
+            elif tilt is None:
+                tilt = self.current_tilt
+                
             if zoom is None:
                 zoom = self.current_zoom
             if speed is None:
@@ -206,6 +210,12 @@ class PTZController:
             # Clamp pan to limits
             pan = max(self.ptz_config['min_pan_angle'], 
                      min(self.ptz_config['max_pan_angle'], pan))
+            
+            # For pan-only movement, use pan command instead of absolute position
+            if pan_only:
+                # Use pan command that doesn't affect tilt
+                await self.pan_to(pan, speed=speed)
+                return
             
             # Convert degrees to VISCA units
             pan_units = self._degrees_to_visca_units(pan)
@@ -252,8 +262,71 @@ class PTZController:
                 self.logger.debug(f"Moved to position: Pan={pan:.1f}°, Tilt={tilt:.1f}°")
     
     async def pan_to(self, pan_angle: float, speed: Optional[float] = None):
-        """Pan to specific angle (keeping current tilt/zoom)"""
-        await self.move_to_position(pan_angle, speed=speed)
+        """Pan to specific angle (keeping current tilt/zoom) using pan-only command"""
+        async with self.movement_lock:
+            if not self.connected:
+                return
+                
+            if speed is None:
+                speed = 0.5  # Default medium speed
+                
+            # Clamp pan to limits
+            pan_angle = max(self.ptz_config['min_pan_angle'], 
+                           min(self.ptz_config['max_pan_angle'], pan_angle))
+            
+            # Convert degrees to VISCA units
+            pan_units = self._degrees_to_visca_units(pan_angle)
+            
+            # Clamp to valid VISCA ranges
+            pan_units = max(-0x8000, min(0x7FFF, pan_units))
+            
+            # Convert to unsigned for transmission
+            if pan_units < 0:
+                pan_units += 0x10000
+            
+            # Convert speed (0.0-1.0) to VISCA speed (1-24 for pan)
+            visca_pan_speed = max(1, min(int(speed * self.max_pan_speed), self.max_pan_speed))
+            
+            # Extract nibbles for pan position
+            pan_nibbles = [
+                (pan_units >> 12) & 0x0F,
+                (pan_units >> 8) & 0x0F,
+                (pan_units >> 4) & 0x0F,
+                pan_units & 0x0F
+            ]
+            
+            # Pan absolute position command (without affecting tilt): 81 01 06 03 VV 0Y 0Y 0Y 0Y FF
+            command = [0x81, 0x01, 0x06, 0x03, visca_pan_speed] + pan_nibbles + [0xFF]
+            
+            if self._send_command(command):
+                self.current_pan = pan_angle
+                self.logger.debug(f"Pan to: {pan_angle:.1f}° (tilt unchanged)")
+    
+    async def pan_left(self, speed: float = 0.3):
+        """Pan camera left (continuous movement)"""
+        if not self.connected:
+            return
+            
+        # Convert speed (0.0-1.0) to VISCA speed (1-24)
+        visca_pan_speed = max(1, min(int(speed * self.max_pan_speed), self.max_pan_speed))
+        
+        # Pan left command: 81 01 06 01 VV 00 01 03 FF
+        command = [0x81, 0x01, 0x06, 0x01, visca_pan_speed, 0x00, 0x01, 0x03, 0xFF]
+        self._send_command(command)
+        self.logger.debug(f"Pan left at speed {speed:.2f}")
+    
+    async def pan_right(self, speed: float = 0.3):
+        """Pan camera right (continuous movement)"""
+        if not self.connected:
+            return
+            
+        # Convert speed (0.0-1.0) to VISCA speed (1-24)
+        visca_pan_speed = max(1, min(int(speed * self.max_pan_speed), self.max_pan_speed))
+        
+        # Pan right command: 81 01 06 01 VV 00 02 03 FF
+        command = [0x81, 0x01, 0x06, 0x01, visca_pan_speed, 0x00, 0x02, 0x03, 0xFF]
+        self._send_command(command)
+        self.logger.debug(f"Pan right at speed {speed:.2f}")
     
     async def goto_preset(self, preset_number: Optional[int] = None):
         """Go to preset position"""
@@ -308,10 +381,46 @@ class PTZController:
         """Calculate pan angle for normalized X position (0.0 to 1.0)"""
         # Convert normalized position to pan angle
         # x_normalized: 0.0 = left edge, 0.5 = center, 1.0 = right edge
+        
         pan_range = self.ptz_config['max_pan_angle'] - self.ptz_config['min_pan_angle']
-        target_pan = self.ptz_config['min_pan_angle'] + (x_normalized * pan_range)
+        
+        # Check if pan should be inverted (for cameras facing different directions)
+        invert_pan = self.ptz_config.get('invert_pan', False)
+        
+        if invert_pan:
+            # INVERTED: When person is on left (x=0), camera should pan right (positive)
+            #          When person is on right (x=1), camera should pan left (negative)
+            target_pan = self.ptz_config['max_pan_angle'] - (x_normalized * pan_range)
+        else:
+            # NORMAL: When person is on left (x=0), camera should pan left (negative)
+            #        When person is on right (x=1), camera should pan right (positive)
+            target_pan = self.ptz_config['min_pan_angle'] + (x_normalized * pan_range)
         
         return target_pan
+    
+    def calculate_tilt_for_position(self, y_normalized: float) -> float:
+        """Calculate tilt angle for normalized Y position (0.0 to 1.0)"""
+        # Convert normalized position to tilt angle
+        # y_normalized: 0.0 = top edge, 0.5 = center, 1.0 = bottom edge
+        # Use a much smaller tilt range for smooth tracking (±15° from center)
+        
+        # Define a reasonable tilt range for person tracking (not the full camera range)
+        tracking_tilt_range = 30.0  # ±15° from center position
+        center_tilt = 0.0  # Assume level is center for person tracking
+        
+        # Convert y position to tilt offset from center
+        # When person is at top (y=0), tilt up slightly (+15°)
+        # When person is at center (y=0.5), no tilt (0°)
+        # When person is at bottom (y=1), tilt down slightly (-15°)
+        tilt_offset = (0.5 - y_normalized) * tracking_tilt_range
+        target_tilt = center_tilt + tilt_offset
+        
+        # Clamp to reasonable limits for person tracking
+        min_tilt = self.ptz_config.get('min_tilt_angle', -90.0)
+        max_tilt = self.ptz_config.get('max_tilt_angle', 20.0)
+        target_tilt = max(min_tilt, min(max_tilt, target_tilt))
+        
+        return target_tilt
     
     def is_in_dead_zone(self, x_normalized: float) -> bool:
         """Check if position is in the center dead zone"""

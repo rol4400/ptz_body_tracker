@@ -1,33 +1,476 @@
 #!/usr/bin/env python3
 """
-PTZ Camera Tracking System
-Main entry point for the application
+PTZ Camera Tracking System - Main Application
+Tracks people using PTZ camera with YOLOv8 detection and VISCA control
 """
 
-import argparse
-import sys
-import logging
-from pathlib import Path
+import cv2
 import asyncio
-import signal
+import logging
+import time
 import json
+import sys
+import argparse
+from pathlib import Path
+import signal
+import threading
+from typing import Optional
+from queue import Queue, Empty
 
-from src.tracker import PTZTracker
-from src.api_server import APIServer
-from src.osc_server import OSCServer
+from src.person_tracker import BodyTracker
+from src.camera_controller import PTZController
+from src.debug_window import DebugWindow
 
 
-def setup_logging(debug: bool = False):
-    """Setup logging configuration"""
-    level = logging.DEBUG if debug else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler('ptz_tracker.log')
+class LatencyOptimizedCapture:
+    """Video capture with minimal latency using threading"""
+    
+    def __init__(self, rtsp_url: str):
+        self.rtsp_url = rtsp_url
+        self.capture = None
+        self.frame_queue = Queue(maxsize=2)  # Small queue
+        self.latest_frame = None
+        self.capture_thread = None
+        self.running = False
+        
+    def start(self):
+        """Start capture thread"""
+        self.capture = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
+        if not self.capture.isOpened():
+            return False
+            
+        # Optimize for low latency and full resolution
+        self.capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self.capture.set(cv2.CAP_PROP_FPS, 25)
+        
+        # Ensure we get the full resolution from the camera stream
+        # Don't set frame width/height to let the camera provide its native resolution
+        
+        self.running = True
+        self.capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self.capture_thread.start()
+        return True
+    
+    def _capture_loop(self):
+        """Continuous capture loop that keeps only the latest frame"""
+        while self.running and self.capture:
+            ret, frame = self.capture.read()
+            if ret:
+                # Clear queue and add latest frame
+                while not self.frame_queue.empty():
+                    try:
+                        self.frame_queue.get_nowait()
+                    except Empty:
+                        break
+                
+                try:
+                    self.frame_queue.put_nowait(frame)
+                    self.latest_frame = frame
+                except:
+                    pass  # Queue full, skip frame
+    
+    def read(self):
+        """Get the latest frame"""
+        try:
+            frame = self.frame_queue.get_nowait()
+            return True, frame
+        except Empty:
+            # Return last known frame if queue is empty
+            if self.latest_frame is not None:
+                return True, self.latest_frame
+            return False, None
+    
+    def stop(self):
+        """Stop capture"""
+        self.running = False
+        if self.capture_thread:
+            self.capture_thread.join(timeout=1.0)
+        if self.capture:
+            self.capture.release()
+    
+    def get(self, prop):
+        """Get capture property"""
+        if self.capture:
+            return self.capture.get(prop)
+        return 0
+
+
+class PTZTrackingSystem:
+    """Main PTZ tracking system"""
+    
+    def __init__(self, config: dict, show_debug: bool = False):
+        self.config = config
+        self.show_debug = show_debug
+        self.logger = logging.getLogger(__name__)
+        
+        # Initialize components
+        self.body_tracker = BodyTracker(config)
+        self.ptz_controller = PTZController(config)
+        
+        # Video capture
+        self.video_capture: Optional[LatencyOptimizedCapture] = None
+        self.current_frame = None
+        self.frame_lock = threading.Lock()
+        
+        # Debug window
+        if self.show_debug:
+            self.debug_window = DebugWindow("PTZ Camera Tracker")
+            self.show_help = False
+        else:
+            self.debug_window = None
+        
+        # Tracking state
+        self.is_running = False
+        self.is_tracking = False
+        self.is_paused = False
+        self.primary_person_id = None
+        
+        # Movement control
+        self.last_movement_time = 0
+        self.movement_cooldown = 0.5  # Reduced from 3.0 to 0.5 seconds for more responsive movement
+        self.is_camera_moving = False  # Track if camera is currently moving
+        self.dead_zone_width = config.get('tracking', {}).get('dead_zone_width', 0.2)
+        
+        # Person tracking stability
+        self.person_selection_frames = 0
+        self.min_selection_frames = 5  # Reduced from 30 to 5 frames for faster re-selection
+        self.lost_person_timeout = 60  # Increased from 30 to 60 frames to keep tracking longer
+        self.frame_skip_count = 0
+        self.frame_skip_target = self.config.get('system', {}).get('frame_skip', 1)
+        
+        # Remember last position for quick re-locking
+        self.last_primary_position = None
+        self.last_primary_id = None
+        
+    async def initialize(self):
+        """Initialize all components"""
+        self.logger.info("Initializing PTZ tracking system...")
+        
+        # Initialize PTZ controller
+        if not await self.ptz_controller.initialize():
+            raise Exception("Failed to initialize PTZ controller")
+        
+        # Initialize video capture from camera RTSP stream
+        camera_config = self.config['camera']
+        
+        # Try multiple RTSP stream URLs
+        rtsp_urls = [
+            camera_config.get('stream_url', f"rtsp://{camera_config['ip']}:554/stream1"),
+            f"rtsp://{camera_config['ip']}:554/stream0",
+            f"rtsp://{camera_config['ip']}:554/live",
+            f"rtsp://{camera_config['ip']}:554/h264",
+            f"rtsp://{camera_config['username']}:{camera_config['password']}@{camera_config['ip']}:554/stream1"
         ]
-    )
+        
+        self.video_capture = None
+        for rtsp_url in rtsp_urls:
+            self.logger.info(f"Trying RTSP URL: {rtsp_url}")
+            capture = LatencyOptimizedCapture(rtsp_url)
+            
+            if capture.start():
+                # Test if we can actually read a frame
+                time.sleep(0.5)  # Give it time to start
+                ret, test_frame = capture.read()
+                if ret and test_frame is not None:
+                    self.logger.info(f"[OK] Successfully connected to: {rtsp_url}")
+                    self.video_capture = capture
+                    break
+                else:
+                    capture.stop()
+            else:
+                capture.stop()
+        
+        if not self.video_capture:
+            self.logger.error("Failed to connect to any RTSP stream")
+            raise Exception("Failed to open camera stream")
+        
+        # Get actual stream properties
+        actual_fps = self.video_capture.get(cv2.CAP_PROP_FPS)
+        width = int(self.video_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(self.video_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        self.logger.info(f"Stream properties: {width}x{height} @ {actual_fps:.1f} FPS")
+        self.logger.info(f"Aspect ratio: {width/height:.2f} (16:9 = 1.78)")
+        
+        # Verify we have a proper 16:9 aspect ratio for full coverage
+        aspect_ratio = width / height
+        if abs(aspect_ratio - 16/9) > 0.1:
+            self.logger.warning(f"Stream aspect ratio {aspect_ratio:.2f} may not be 16:9. Check camera stream settings.")
+        
+        self.logger.info("PTZ tracking system initialized successfully")
+    
+    def update_camera_position(self, people):
+        """Update camera position based on primary person"""
+        if not self.is_tracking or self.is_paused:
+            return
+        
+        current_time = time.time()
+        if current_time - self.last_movement_time < self.movement_cooldown:
+            return
+        
+        # Find primary person or select one
+        primary_person = None
+        if self.primary_person_id:
+            # Look for existing primary person
+            for person in people:
+                if person.id == self.primary_person_id:
+                    primary_person = person
+                    self.lost_person_timeout = 30  # Reset timeout when found
+                    break
+            
+            # If primary person not found, decrement timeout
+            if not primary_person:
+                self.lost_person_timeout -= 1
+                if self.lost_person_timeout <= 0:
+                    self.logger.info(f"Lost primary person {self.primary_person_id} - resetting")
+                    self.primary_person_id = None
+                    self.person_selection_frames = 0
+        
+        if not primary_person and people:
+            # First, try to find a person near the last known position
+            if self.last_primary_position is not None:
+                closest_person = None
+                min_distance = float('inf')
+                
+                for person in people:
+                    # Calculate distance from last known position
+                    distance = ((person.center[0] - self.last_primary_position[0])**2 + 
+                              (person.center[1] - self.last_primary_position[1])**2)**0.5
+                    
+                    if distance < min_distance and distance < 0.2:  # Within 20% of frame
+                        min_distance = distance
+                        closest_person = person
+                
+                # If we found someone close to last position, select them immediately
+                if closest_person:
+                    self.primary_person_id = closest_person.id
+                    primary_person = closest_person
+                    self.logger.info(f"Re-selected person {self.primary_person_id} near last position")
+                    self.person_selection_frames = 0
+            
+            # If no one near last position, select largest person with reduced stability requirement
+            if not primary_person:
+                largest_person = max(people, key=lambda p: p.size)
+                
+                # Only switch to new person if we've seen them for enough frames
+                if not hasattr(self, 'candidate_person_id') or self.candidate_person_id != largest_person.id:
+                    self.candidate_person_id = largest_person.id
+                    self.person_selection_frames = 1
+                else:
+                    self.person_selection_frames += 1
+                    
+                if self.person_selection_frames >= self.min_selection_frames:
+                    self.primary_person_id = largest_person.id
+                    primary_person = largest_person
+                    self.logger.info(f"Selected primary person: {self.primary_person_id}")
+                    self.person_selection_frames = 0
+        
+        if primary_person:
+            # Remember the position for quick re-locking
+            self.last_primary_position = primary_person.center
+            self.last_primary_id = primary_person.id
+            
+            # Calculate target pan position (horizontal tracking only)
+            person_x = primary_person.center[0]  # Normalized X position (0-1)
+            
+            # Check if person is outside horizontal dead zone (only care about X position)
+            horizontal_dead_zone = not self.ptz_controller.is_in_dead_zone(person_x)
+            
+            self.logger.debug(f"Person at x={person_x:.3f}, dead_zone={not horizontal_dead_zone}")
+            
+            if horizontal_dead_zone:
+                # Use continuous movement based on which side of center person is on
+                center_x = 0.5
+                offset_from_center = person_x - center_x
+                
+                # Only move if person is significantly off-center
+                if abs(offset_from_center) > 0.03:  # 3% of frame width
+                    # Determine movement direction
+                    if offset_from_center > 0:
+                        # Person is on right side, need to pan right
+                        desired_direction = "right"
+                    else:
+                        # Person is on left side, need to pan left
+                        desired_direction = "left"
+                    
+                    # Check if we need to start movement or change direction
+                    if not self.is_camera_moving or getattr(self, 'current_direction', None) != desired_direction:
+                        # Stop any current movement first
+                        if self.is_camera_moving:
+                            asyncio.create_task(self.ptz_controller.stop_movement())
+                            # Brief pause handled by the movement command timing
+                        
+                        # Start movement in new direction
+                        # Use slower speed for smoother movement
+                        movement_speed = 0.05  # Very slow continuous movement
+                        
+                        if desired_direction == "right":
+                            asyncio.create_task(self.ptz_controller.pan_right(movement_speed))
+                        else:
+                            asyncio.create_task(self.ptz_controller.pan_left(movement_speed))
+                        
+                        self.is_camera_moving = True
+                        self.current_direction = desired_direction
+                        self.last_movement_time = current_time
+                        self.logger.info(f"Starting continuous pan {desired_direction} at speed {movement_speed:.3f} (person at x={person_x:.3f})")
+                    
+                    # Update last movement time to prevent timeout
+                    self.last_movement_time = current_time
+                else:
+                    # Person is close to center but still outside dead zone
+                    if self.is_camera_moving:
+                        asyncio.create_task(self.ptz_controller.stop_movement())
+                        self.is_camera_moving = False
+                        self.current_direction = None
+                        self.logger.info(f"Stopping - person close to center at x={person_x:.3f}")
+            else:
+                # Person is in dead zone - stop any ongoing movement
+                if self.is_camera_moving:
+                    asyncio.create_task(self.ptz_controller.stop_movement())
+                    self.is_camera_moving = False
+                    self.current_direction = None
+                    self.logger.info(f"Person in dead zone - stopping camera movement")
+                else:
+                    self.logger.debug(f"Person in dead zone, no movement needed")
+    
+    def is_in_vertical_dead_zone(self, y_normalized: float) -> bool:
+        """Check if Y position is in the vertical center dead zone"""
+        dead_zone_height = self.config['tracking']['dead_zone_height']
+        center_y = 0.5
+        dead_zone_top = center_y - (dead_zone_height / 2)
+        dead_zone_bottom = center_y + (dead_zone_height / 2)
+        
+        return dead_zone_top <= y_normalized <= dead_zone_bottom
+    
+    async def move_camera_relative(self, direction: str, speed: float):
+        """Move camera in relative direction"""
+        if direction == "left":
+            await self.ptz_controller.pan_left(speed)
+        elif direction == "right":
+            await self.ptz_controller.pan_right(speed)
+        
+        # Schedule automatic stop after short duration
+        asyncio.create_task(self.auto_stop_movement(0.15))  # Much shorter movement pulses
+    
+    async def auto_stop_movement(self, delay: float):
+        """Automatically stop movement after delay"""
+        await asyncio.sleep(delay)
+        await self.ptz_controller.stop_movement()
+        self.is_camera_moving = False
+    
+    async def run(self):
+        """Main tracking loop"""
+        self.is_running = True
+        self.logger.info("Starting PTZ tracking...")
+        
+        try:
+            while self.is_running:
+                # Capture frame
+                if self.video_capture is None:
+                    self.logger.error("Video capture is None")
+                    break
+                    
+                ret, frame = self.video_capture.read()
+                if not ret or frame is None:
+                    self.logger.warning("Failed to read frame from camera")
+                    await asyncio.sleep(0.1)
+                    continue
+                
+                # Skip frames for performance if configured
+                self.frame_skip_count += 1
+                if self.frame_skip_count < self.frame_skip_target:
+                    continue
+                self.frame_skip_count = 0
+                
+                with self.frame_lock:
+                    self.current_frame = frame.copy()
+                
+                if not self.is_paused:
+                    # Detect people
+                    people = self.body_tracker.detect_people(frame)
+                    
+                    # Debug: Log detection info
+                    if len(people) > 0:
+                        self.logger.debug(f"Detected {len(people)} people: {[f'ID:{p.id} conf:{p.confidence:.2f} pos:({p.center[0]:.2f},{p.center[1]:.2f})' for p in people]}")
+                    
+                    # Update camera position
+                    self.update_camera_position(people)
+                else:
+                    people = []
+                
+                # Show debug window if enabled
+                if self.debug_window:
+                    key = self.debug_window.show_frame(
+                        frame, 
+                        people, 
+                        self.primary_person_id,
+                        self.show_help
+                    )
+                    
+                    action = self.debug_window.handle_key(key)
+                    if action == 'quit':
+                        break
+                    elif action == 'lock':
+                        await self.lock_primary_person()
+                    elif action == 'toggle_help':
+                        self.show_help = not self.show_help
+                    elif action == 'pause':
+                        self.is_paused = not self.is_paused
+                        status = "paused" if self.is_paused else "resumed"
+                        self.logger.info(f"Tracking {status}")
+                
+                await asyncio.sleep(0.04)  # Target ~25 FPS to match fps_limit
+                
+        except Exception as e:
+            self.logger.error(f"Error in tracking loop: {e}")
+        finally:
+            await self.cleanup()
+    
+    async def start_tracking(self):
+        """Start person tracking"""
+        self.is_tracking = True
+        self.logger.info("Person tracking started")
+    
+    async def stop_tracking(self):
+        """Stop person tracking"""
+        self.is_tracking = False
+        self.primary_person_id = None
+        await self.ptz_controller.stop_movement()
+        self.logger.info("Person tracking stopped")
+    
+    async def lock_primary_person(self):
+        """Lock onto the current primary person"""
+        if self.primary_person_id:
+            self.logger.info(f"Locked onto primary person: {self.primary_person_id}")
+        else:
+            self.logger.warning("No primary person to lock onto")
+    
+    async def goto_home(self):
+        """Move camera to home position"""
+        await self.ptz_controller.goto_home()
+        self.logger.info("Camera moved to home position")
+    
+    async def goto_preset(self, preset_number: int = 1):
+        """Move camera to preset position"""
+        await self.ptz_controller.goto_preset(preset_number)
+        self.logger.info(f"Camera moved to preset {preset_number}")
+    
+    async def cleanup(self):
+        """Clean up resources"""
+        self.is_running = False
+        
+        if self.video_capture:
+            self.video_capture.stop()
+            self.video_capture = None
+        
+        if self.debug_window:
+            cv2.destroyAllWindows()
+        
+        if self.ptz_controller:
+            self.ptz_controller.disconnect()
+        
+        cv2.destroyAllWindows()
+        self.logger.info("PTZ tracking system cleaned up")
 
 
 def load_config(config_path: str = "config.json") -> dict:
@@ -43,16 +486,27 @@ def load_config(config_path: str = "config.json") -> dict:
         sys.exit(1)
 
 
+def setup_logging(debug: bool = False):
+    """Setup logging configuration"""
+    level = logging.DEBUG if debug else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler('ptz_tracker.log')
+        ]
+    )
+
+
 async def main():
-    """Main application entry point"""
+    """Main entry point"""
     parser = argparse.ArgumentParser(description='PTZ Camera Tracking System')
     parser.add_argument('--config', default='config.json', help='Configuration file path')
-    parser.add_argument('--start', action='store_true', help='Start tracking')
-    parser.add_argument('--stop', action='store_true', help='Stop tracking')
-    parser.add_argument('--lock', action='store_true', help='Lock onto primary person')
-    parser.add_argument('--preset', action='store_true', help='Go to default preset')
-    parser.add_argument('--daemon', action='store_true', help='Run as daemon with API/OSC servers')
-    parser.add_argument('--debug', action='store_true', help='Enable debug logging')
+    parser.add_argument('--debug', action='store_true', help='Enable debug logging and window')
+    parser.add_argument('--no-window', action='store_true', help='Run without debug window')
+    parser.add_argument('--home', action='store_true', help='Move camera to home position and exit')
+    parser.add_argument('--preset', type=int, help='Move camera to preset position and exit')
     
     args = parser.parse_args()
     
@@ -63,75 +517,36 @@ async def main():
     logger = logging.getLogger(__name__)
     logger.info("Starting PTZ Camera Tracking System")
     
-    # Initialize tracker
-    tracker = PTZTracker(config)
+    # Create tracking system
+    show_debug = args.debug and not args.no_window
+    system = PTZTrackingSystem(config, show_debug=show_debug)
     
     try:
-        await tracker.initialize()
+        await system.initialize()
         
         # Handle single commands
-        if args.start:
-            await tracker.start_tracking()
-            logger.info("Tracking started")
-            return
-        elif args.stop:
-            await tracker.stop_tracking()
-            logger.info("Tracking stopped")
-            return
-        elif args.lock:
-            await tracker.lock_primary_person()
-            logger.info("Locked onto primary person")
+        if args.home:
+            await system.goto_home()
             return
         elif args.preset:
-            await tracker.goto_preset()
-            logger.info("Moved to default preset")
+            await system.goto_preset(args.preset)
             return
         
-        # Run as daemon with servers
-        if args.daemon:
-            logger.info("Starting daemon mode with API and OSC servers")
-            
-            # Initialize servers
-            api_server = APIServer(tracker, config['api'])
-            osc_server = OSCServer(tracker, config['osc'])
-            
-            # Setup signal handlers for graceful shutdown
-            def signal_handler(signum, frame):
-                logger.info("Received signal, shutting down...")
-                asyncio.create_task(shutdown(tracker, api_server, osc_server))
-            
-            signal.signal(signal.SIGINT, signal_handler)
-            signal.signal(signal.SIGTERM, signal_handler)
-            
-            # Start servers
-            await asyncio.gather(
-                api_server.start(),
-                osc_server.start(),
-                tracker.run()
-            )
-        else:
-            # Default: start tracking
-            await tracker.start_tracking()
-            await tracker.run()
-            
+        # Setup signal handlers for graceful shutdown
+        def signal_handler(signum, frame):
+            logger.info("Received signal, shutting down...")
+            system.is_running = False
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        
+        # Start tracking and run main loop
+        await system.start_tracking()
+        await system.run()
+        
     except Exception as e:
         logger.error(f"Application error: {e}")
         sys.exit(1)
-    finally:
-        await tracker.cleanup()
-
-
-async def shutdown(tracker, api_server, osc_server):
-    """Graceful shutdown"""
-    logger = logging.getLogger(__name__)
-    logger.info("Shutting down...")
-    
-    await tracker.stop_tracking()
-    await tracker.cleanup()
-    await api_server.stop()
-    await osc_server.stop()
-    
-    sys.exit(0)
 
 
 if __name__ == "__main__":

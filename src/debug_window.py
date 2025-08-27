@@ -210,7 +210,11 @@ class DebugWindow:
         if show_help:
             self.draw_controls_help(display_frame)
         
-        # Show the frame
+        # Ensure window displays full frame without cropping
+        # Create window with resizable property to maintain aspect ratio
+        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+        
+        # Show the frame at full resolution
         cv2.imshow(self.window_name, display_frame)
         
         return cv2.waitKey(1) & 0xFF
