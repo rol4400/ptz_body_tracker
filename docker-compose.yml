@@ -1,0 +1,84 @@
+services:
+  ptz-tracker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ptz-camera-tracker
+    restart: unless-stopped
+    
+    # Network configuration
+    network_mode: host
+    
+    # Environment variables
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+    
+    # Volume mounts
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./logs:/app/logs
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw  # For X11 if needed
+    
+    # Resource limits to prevent resource drain
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Security
+    security_opt:
+      - no-new-privileges:true
+    
+    # Capabilities (minimal required)
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+
+# Optional: Separate service for development/testing with GUI
+  ptz-tracker-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ptz-camera-tracker-dev
+    profiles: ["dev"]  # Only run with --profile dev
+    
+    network_mode: host
+    
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=DEBUG
+      - DISPLAY=${DISPLAY}
+    
+    volumes:
+      - ./config.json:/app/config.json:rw
+      - ./logs:/app/logs
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    
+    command: ["python", "main_clean.py", "--debug", "--config", "/app/config.json"]
+    
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G

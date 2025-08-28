@@ -33,6 +33,14 @@ class APIServer:
     def _setup_routes(self):
         """Setup API routes"""
         
+        @self.app.route('/health', methods=['GET'])
+        def health_check():
+            """Health check endpoint for Docker"""
+            return jsonify({
+                'status': 'healthy',
+                'service': 'ptz-tracker'
+            })
+        
         @self.app.route('/api/status', methods=['GET'])
         def get_status():
             """Get current tracking status"""

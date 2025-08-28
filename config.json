@@ -34,12 +34,7 @@
     "min_tilt_angle": -90,
     "invert_pan": false,
     "movement_threshold": 0.1,
-    "continuous_move": true,
-    "home_position": {
-      "pan": 0,
-      "tilt": 0,
-      "zoom": 0
-    }
+    "continuous_move": true
   },
   "api": {
     "host": "127.0.0.1",
