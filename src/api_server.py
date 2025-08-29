@@ -11,7 +11,6 @@ from flask_cors import CORS
 import threading
 import json
 
-
 class APIServer:
     """HTTP REST API server for controlling PTZ tracker"""
     

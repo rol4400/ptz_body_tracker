@@ -19,7 +19,7 @@
     "lost_tracking_timeout": 2.0,
     "min_detection_size": 0.02,
     "max_people": 3,
-    "lock_distance_threshold": 0.15,
+    "lock_distance_thre+shold": 0.15,
     "track_buffer_frames": 60,
     "min_track_hits": 1,
     "iou_threshold": 0.2

@@ -100,10 +100,20 @@ class BodyTracker:
         self.tracking_config = config['tracking']
         self.logger = logging.getLogger(__name__)
         
-        # Initialize YOLOv8 model
+        # Initialize YOLOv8 model with GPU support if available
         try:
             self.model = YOLO('yolov8n.pt')  # Will download if not present
-            self.logger.info("YOLOv8n model loaded successfully")
+            
+            # Check for CUDA availability and set device
+            import torch
+            if torch.cuda.is_available():
+                self.device = 'cuda'
+                self.model.to('cuda')
+                self.logger.info(f"YOLOv8n model loaded with GPU acceleration (CUDA device count: {torch.cuda.device_count()})")
+            else:
+                self.device = 'cpu'
+                self.logger.info("YOLOv8n model loaded on CPU (CUDA not available)")
+                
         except Exception as e:
             self.logger.error(f"Failed to load YOLOv8 model: {e}")
             raise
@@ -136,8 +146,8 @@ class BodyTracker:
             # Always update tracker (even with empty detections for prediction)
             detections = []
             
-            # Run YOLOv8 inference
-            results = self.model(frame, verbose=False, classes=[0])  # class 0 is 'person'
+            # Run YOLOv8 inference with device specification
+            results = self.model(frame, verbose=False, classes=[0], device=self.device)  # class 0 is 'person'
             
             if results and len(results) > 0:
                 # Extract detections

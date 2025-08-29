@@ -206,7 +206,7 @@ class PTZTrackingSystem:
         self.logger.info("PTZ tracking system initialized successfully")
     
     def update_camera_position(self, people):
-        """Update camera position based on primary person"""
+        # Update camera position based on primary person
         if not self.is_tracking or self.is_paused:
             return
         
