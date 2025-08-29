@@ -10,7 +10,7 @@ from typing import List, Dict, Optional, Tuple, Any
 import time
 import math
 from ultralytics import YOLO
-from .body_tracker_yolo import SimpleTracker
+from .simple_tracker import SimpleTracker
 
 
 class Person:
