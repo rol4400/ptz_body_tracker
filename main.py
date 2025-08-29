@@ -71,6 +71,9 @@ class LatencyOptimizedCapture:
                     pass
                 except:
                     pass  # Queue full, skip frame
+            else:
+                # If read failed, sleep a bit to avoid hammering the camera
+                time.sleep(0.01)
     
     def read(self):
         """Get the latest frame"""
@@ -408,7 +411,7 @@ class PTZTrackingSystem:
             while self.is_running:
                 # If tracking is not active, just sleep to save resources
                 if not self.is_tracking:
-                    await asyncio.sleep(0.1)  # Minimal resource usage when not tracking
+                    await asyncio.sleep(1.0)  # Sleep longer when not tracking to save CPU
                     continue
                 
                 # Capture frame only when tracking is active
@@ -504,6 +507,13 @@ class PTZTrackingSystem:
         self.last_lock_time = time.time()  # Reset no-lock timer when stopping
         self.preset_recalled = False  # Reset preset recall flag
         await self.ptz_controller.stop_movement()
+        
+        # Stop and clean up video capture to save CPU
+        if self.video_capture:
+            self.video_capture.stop()
+            self.video_capture = None
+            self.logger.info("Video capture stopped to save resources")
+        
         self.logger.info("Person tracking stopped")
     
     async def lock_primary_person(self):

@@ -203,7 +203,7 @@ class OSCController:
                     
             except queue.Empty:
                 # No commands to process
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.5)  # Sleep longer when no commands to save CPU
             except Exception as e:
                 self.logger.error(f"Error processing OSC command: {e}")
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.5)
