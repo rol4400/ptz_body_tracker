@@ -158,6 +158,11 @@ class PTZTrackingSystem:
         self.current_direction = None
         self.direction_change_cooldown = 0.3  # Reduced from 1.0 for faster direction changes
         
+        # No-lock preset recall
+        self.last_lock_time = time.time()  # When we last had a person locked
+        self.no_lock_timeout = 2.0  # Seconds before going to preset
+        self.preset_recalled = False  # Track if we've already recalled preset to avoid spam
+        
     async def initialize(self):
         """Initialize all components"""
         self.logger.info("Initializing PTZ tracking system...")
@@ -298,6 +303,10 @@ class PTZTrackingSystem:
             self.last_primary_position = primary_person.center
             self.last_primary_id = primary_person.id
             
+            # Update lock time - we have a person locked
+            self.last_lock_time = current_time
+            self.preset_recalled = False  # Reset preset recall flag
+            
             # Calculate target pan position (horizontal tracking only)
             person_x = primary_person.center[0]  # Normalized X position (0-1)
             
@@ -374,6 +383,12 @@ class PTZTrackingSystem:
                     self.is_camera_moving = False
                     self.current_direction = None
                     self.logger.info(f"Person in dead zone - stopping camera movement")
+        else:
+            # No primary person - check if we should go to preset
+            if current_time - self.last_lock_time > self.no_lock_timeout and not self.preset_recalled:
+                self.logger.info(f"No person locked for {self.no_lock_timeout} seconds - recalling preset 4")
+                asyncio.create_task(self.goto_preset(4))
+                self.preset_recalled = True
     
     def is_in_vertical_dead_zone(self, y_normalized: float) -> bool:
         """Check if Y position is in the vertical center dead zone"""
@@ -478,12 +493,16 @@ class PTZTrackingSystem:
             asyncio.create_task(self.run())
         
         self.is_tracking = True
+        self.last_lock_time = time.time()  # Reset no-lock timer when starting tracking
+        self.preset_recalled = False  # Reset preset recall flag
         self.logger.info("Person tracking started")
     
     async def stop_tracking(self):
         """Stop person tracking"""
         self.is_tracking = False
         self.primary_person_id = None
+        self.last_lock_time = time.time()  # Reset no-lock timer when stopping
+        self.preset_recalled = False  # Reset preset recall flag
         await self.ptz_controller.stop_movement()
         self.logger.info("Person tracking stopped")
     

@@ -61,6 +61,7 @@ class OSCController:
         dispatcher.map("/ptz/stop", self.handle_stop)
         dispatcher.map("/ptz/relock", self.handle_relock)
         dispatcher.map("/ptz/status", self.handle_status_request)
+        dispatcher.map("/ptz/preset", self.handle_preset)
         
         # Query commands
         dispatcher.map("/ptz/people_count", self.handle_people_count_request)
@@ -129,6 +130,13 @@ class OSCController:
             self.command_queue.put(('relock', None))
             self.logger.info("OSC: Relock command received")
     
+    def handle_preset(self, unused_addr, *args):
+        """Handle preset recall command"""
+        if self.tracking_system:
+            preset_number = args[0] if args else 4  # Default to preset 4
+            self.command_queue.put(('preset', preset_number))
+            self.logger.info(f"OSC: Preset {preset_number} command received")
+    
     def handle_status_request(self, unused_addr, *args):
         """Handle status request"""
         self.send_status_update()
@@ -188,6 +196,9 @@ class OSCController:
                     self.send_status_update()
                 elif command == 'relock':
                     await self.tracking_system.lock_primary_person()
+                    self.send_status_update()
+                elif command == 'preset':
+                    await self.tracking_system.goto_preset(args)
                     self.send_status_update()
                     
             except queue.Empty:
