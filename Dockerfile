@@ -1,5 +1,5 @@
 # Use NVIDIA CUDA 13 runtime image
-FROM nvidia/cuda:13.0-runtime-ubuntu22.04
+FROM nvidia/cuda:13.0.0-runtime-ubuntu22.04
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive

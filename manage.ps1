@@ -37,7 +37,7 @@ switch ($Command) {
     }
     "test-gpu" {
         Write-Info "Testing GPU support..."
-        docker run --rm --gpus all nvidia/cuda:13.0-runtime-ubuntu22.04 nvidia-smi
+        docker run --rm --gpus all nvidia/cuda:13.0.0-runtime-ubuntu22.04 nvidia-smi
     }
     "help" {
         Write-Host "PTZ Camera Tracker Management" -ForegroundColor Cyan
