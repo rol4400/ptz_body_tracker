@@ -205,7 +205,7 @@ class BodyTracker:
                         self.detection_count += 1
             
             # Log detection stats periodically
-            if self.frame_count % 60 == 0:  # Every 2 seconds at 30fps
+            if self.frame_count % 300 == 0:  # Every 10 seconds at 30fps
                 self.logger.info(f"Detection stats: {self.detection_count} people detected in {self.frame_count} frames")
             
             return detected_people

@@ -55,37 +55,9 @@ class PTZController:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.settimeout(5.0)
             self.socket.connect((self.ip, self.port))
-            
-            # Test connection with a simple command that we know works
-            # Try pan right then stop (non-destructive test)
-            test_commands = [
-                # [0x81, 0x01, 0x06, 0x01, 0x10, 0x10, 0x02, 0x03, 0xFF],  # Pan right
-                [0x81, 0x01, 0x06, 0x01, 0x10, 0x10, 0x03, 0x03, 0xFF]   # Stop
-            ]
-            
-            connection_ok = False
-            for cmd in test_commands:
-                try:
-                    cmd_bytes = bytes(cmd)
-                    self.socket.send(cmd_bytes)
-                    self.socket.settimeout(2.0)
-                    response = self.socket.recv(1024)
-                    if response:  # Any response indicates the camera is listening
-                        connection_ok = True
-                        break
-                except:
-                    continue
-            
-            if connection_ok:
-                self.connected = True
-                self.logger.info(f"[OK] Connected to VISCA camera at {self.ip}:{self.port}")
-                
-                # Don't get initial position or go to home - just connect
-                await self.get_current_position()
-                return True
-            else:
-                self.logger.error("Camera not responding to VISCA commands")
-                return False
+
+            self.connected = True
+            return True
                 
         except Exception as e:
             self.logger.error(f"Failed to connect to camera: {e}")

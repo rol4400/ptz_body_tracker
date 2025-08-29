@@ -304,8 +304,6 @@ class PTZTrackingSystem:
             # Check if person is outside horizontal dead zone (only care about X position)
             horizontal_dead_zone = not self.ptz_controller.is_in_dead_zone(person_x)
             
-            self.logger.debug(f"Person at x={person_x:.3f}, dead_zone={not horizontal_dead_zone}")
-            
             # Safety check: stop if camera has been moving too long
             if self.is_camera_moving and current_time - self.last_movement_time > 1.5:  # Reduced from 3.0
                 asyncio.create_task(self.ptz_controller.stop_movement())
@@ -346,7 +344,6 @@ class PTZTrackingSystem:
                         self.current_direction = desired_direction
                         self.last_movement_time = current_time
                         self.last_direction_change = current_time
-                        self.logger.info(f"Starting continuous pan {desired_direction} at speed {movement_speed:.3f} (person at x={person_x:.3f})")
                     
                     elif current_direction_attr != desired_direction and (current_time - direction_change_time) > self.direction_change_cooldown:
                         # Need to change direction, but only if enough time has passed
@@ -360,7 +357,6 @@ class PTZTrackingSystem:
                         
                         self.current_direction = desired_direction
                         self.last_direction_change = current_time
-                        self.logger.info(f"Changed direction to {desired_direction} (person at x={person_x:.3f})")
                     
                     # Update last movement time to prevent timeout
                     self.last_movement_time = current_time
@@ -378,8 +374,6 @@ class PTZTrackingSystem:
                     self.is_camera_moving = False
                     self.current_direction = None
                     self.logger.info(f"Person in dead zone - stopping camera movement")
-                else:
-                    self.logger.debug(f"Person in dead zone, camera already stopped")
     
     def is_in_vertical_dead_zone(self, y_normalized: float) -> bool:
         """Check if Y position is in the vertical center dead zone"""
@@ -426,9 +420,17 @@ class PTZTrackingSystem:
                     # Detect people
                     people = self.body_tracker.detect_people(frame)
                     
-                    # Debug: Log detection info
-                    if len(people) > 0:
-                        self.logger.debug(f"Detected {len(people)} people: {[f'ID:{p.id} conf:{p.confidence:.2f} pos:({p.center[0]:.2f},{p.center[1]:.2f})' for p in people]}")
+                    # Log detection info every 5 seconds (150 frames at 30fps)
+                    if hasattr(self, 'log_frame_count'):
+                        self.log_frame_count += 1
+                    else:
+                        self.log_frame_count = 1
+                    
+                    if self.log_frame_count % 150 == 0:  # Every 5 seconds
+                        if len(people) > 0:
+                            self.logger.info(f"Status: Tracking {len(people)} people - Primary: {[f'ID:{p.id} conf:{p.confidence:.2f} pos:({p.center[0]:.2f},{p.center[1]:.2f})' for p in people]}")
+                        else:
+                            self.logger.info("Status: No people detected")
                     
                     # Update camera position
                     self.update_camera_position(people)
@@ -624,18 +626,32 @@ async def main():
             if system.osc_controller and system.osc_controller.enabled:
                 osc_task = asyncio.create_task(system.osc_controller.process_command_queue())
             
-            # Lightweight daemon loop - just keep alive without video processing
+            # Start the main tracking loop but not actively tracking until commanded
+            tracking_task = asyncio.create_task(system.run())
+            
+            # Lightweight daemon loop - just keep alive and monitor tasks
             try:
                 while system.is_running:
+                    # Check if tracking task is still running
+                    if tracking_task.done():
+                        # If tracking task finished, restart it
+                        tracking_task = asyncio.create_task(system.run())
                     await asyncio.sleep(1.0)  # Minimal resource usage
             except KeyboardInterrupt:
                 logger.info("Daemon interrupted")
             finally:
-                # Clean up OSC task
+                # Clean up tasks
                 if osc_task:
                     osc_task.cancel()
                     try:
                         await osc_task
+                    except asyncio.CancelledError:
+                        pass
+                
+                if tracking_task:
+                    tracking_task.cancel()
+                    try:
+                        await tracking_task
                     except asyncio.CancelledError:
                         pass
         else:
