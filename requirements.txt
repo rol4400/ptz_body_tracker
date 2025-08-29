@@ -1,16 +1,12 @@
-# Core computer vision and AI with CUDA support
+# Core computer vision and AI
 opencv-python-headless>=4.8.0
 ultralytics>=8.0.196
 numpy>=1.24.0
+
+# OSC communication  
+python-osc>=1.8.0
 
 # PyTorch with CUDA 12.1 support (install from PyTorch index)
 --index-url https://download.pytorch.org/whl/cu121
 torch>=2.0.0
 torchvision>=0.15.0
-
-# OSC communication  
-python-osc>=1.8.0
-
-# REST API (for Bitfocus Companion integration)
-flask>=2.3.0
-flask-cors>=4.0.0

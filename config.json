@@ -12,14 +12,14 @@
     "rtsp_transport": "tcp"
   },
   "tracking": {
-    "confidence_threshold": 0.3,
+    "confidence_threshold": 0.1,
     "dead_zone_width": 0.4,
     "dead_zone_height": 0.45,
     "smoothing_factor": 0.2,
     "lost_tracking_timeout": 2.0,
-    "min_detection_size": 0.02,
+    "min_detection_size": 0.01,
     "max_people": 3,
-    "lock_distance_thre+shold": 0.15,
+    "lock_distance_threshold": 0.15,
     "track_buffer_frames": 60,
     "min_track_hits": 1,
     "iou_threshold": 0.2
@@ -36,20 +36,16 @@
     "movement_threshold": 0.1,
     "continuous_move": true
   },
-  "api": {
-    "host": "127.0.0.1",
-    "port": 8080,
-    "enable_cors": true
-  },
   "osc": {
-    "host": "127.0.0.1",
+    "enabled": true,
+    "host": "0.0.0.0",
     "port": 8081,
     "client_host": "127.0.0.1",
     "client_port": 8082
   },
   "system": {
     "debug": true,
-    "log_level": "INFO",
+    "log_level": "DEBUG",
     "fps_limit": 30,
     "frame_skip": 0,
     "performance_mode": true,

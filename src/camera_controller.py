@@ -59,7 +59,7 @@ class PTZController:
             # Test connection with a simple command that we know works
             # Try pan right then stop (non-destructive test)
             test_commands = [
-                [0x81, 0x01, 0x06, 0x01, 0x10, 0x10, 0x02, 0x03, 0xFF],  # Pan right
+                # [0x81, 0x01, 0x06, 0x01, 0x10, 0x10, 0x02, 0x03, 0xFF],  # Pan right
                 [0x81, 0x01, 0x06, 0x01, 0x10, 0x10, 0x03, 0x03, 0xFF]   # Stop
             ]
             
@@ -81,6 +81,7 @@ class PTZController:
                 self.logger.info(f"[OK] Connected to VISCA camera at {self.ip}:{self.port}")
                 
                 # Don't get initial position or go to home - just connect
+                await self.get_current_position()
                 return True
             else:
                 self.logger.error("Camera not responding to VISCA commands")

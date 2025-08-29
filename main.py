@@ -20,6 +20,7 @@ from queue import Queue, Empty
 from src.person_tracker import BodyTracker
 from src.camera_controller import PTZController
 from src.debug_window import DebugWindow
+from src.osc_controller import OSCController
 
 
 class LatencyOptimizedCapture:
@@ -121,6 +122,15 @@ class PTZTrackingSystem:
         else:
             self.debug_window = None
         
+        # OSC server only
+        self.osc_controller = None
+        
+        # Enable OSC server based on config
+        osc_config = config.get('osc', {})
+        
+        if osc_config.get('enabled', True):
+            self.osc_controller = OSCController(config, self)
+        
         # Tracking state
         self.is_running = False
         self.is_tracking = False
@@ -156,8 +166,22 @@ class PTZTrackingSystem:
         if not await self.ptz_controller.initialize():
             raise Exception("Failed to initialize PTZ controller")
         
-        # Initialize video capture from camera RTSP stream
-        camera_config = self.config['camera']
+        # Store camera config for later video capture initialization
+        self.camera_config = self.config['camera']
+        
+        # Start OSC server
+        if self.osc_controller:
+            self.osc_controller.start()
+            self.logger.info("OSC controller started")
+        
+        self.logger.info("PTZ tracking system initialized successfully")
+    
+    async def initialize_video_capture(self):
+        """Initialize video capture from camera RTSP stream"""
+        if self.video_capture:
+            return  # Already initialized
+        
+        camera_config = self.camera_config
         
         # Try multiple RTSP stream URLs
         rtsp_urls = [
@@ -202,8 +226,6 @@ class PTZTrackingSystem:
         aspect_ratio = width / height
         if abs(aspect_ratio - 16/9) > 0.1:
             self.logger.warning(f"Stream aspect ratio {aspect_ratio:.2f} may not be 16:9. Check camera stream settings.")
-        
-        self.logger.info("PTZ tracking system initialized successfully")
     
     def update_camera_position(self, people):
         # Update camera position based on primary person
@@ -375,7 +397,12 @@ class PTZTrackingSystem:
         
         try:
             while self.is_running:
-                # Capture frame
+                # If tracking is not active, just sleep to save resources
+                if not self.is_tracking:
+                    await asyncio.sleep(0.1)  # Minimal resource usage when not tracking
+                    continue
+                
+                # Capture frame only when tracking is active
                 if self.video_capture is None:
                     self.logger.error("Video capture is None")
                     break
@@ -438,6 +465,16 @@ class PTZTrackingSystem:
     
     async def start_tracking(self):
         """Start person tracking"""
+        # Initialize video capture if not already done
+        if not self.video_capture:
+            self.logger.info("Initializing video capture for tracking...")
+            await self.initialize_video_capture()
+        
+        if not self.is_running:
+            # Start the main processing loop if not already running
+            self.is_running = True
+            asyncio.create_task(self.run())
+        
         self.is_tracking = True
         self.logger.info("Person tracking started")
     
@@ -465,9 +502,34 @@ class PTZTrackingSystem:
         await self.ptz_controller.goto_preset(preset_number)
         self.logger.info(f"Camera moved to preset {preset_number}")
     
+    def get_status(self):
+        """Get current system status for API"""
+        people_count = len(self.body_tracker.people) if hasattr(self.body_tracker, 'people') else 0
+        return {
+            'is_running': self.is_running,
+            'is_tracking': self.is_tracking,
+            'is_paused': self.is_paused,
+            'primary_person_id': self.primary_person_id,
+            'people_count': people_count,
+            'camera_moving': self.is_camera_moving,
+            'last_movement_time': self.last_movement_time
+        }
+    
+    async def lock_primary_person(self):
+        """Lock onto the primary person"""
+        if self.primary_person_id:
+            self.logger.info(f"Locked onto person {self.primary_person_id}")
+        else:
+            self.logger.warning("No primary person to lock onto")
+    
     async def cleanup(self):
         """Clean up resources"""
         self.is_running = False
+        
+        # Stop servers
+        if self.osc_controller:
+            self.osc_controller.stop()
+            self.logger.info("OSC controller stopped")
         
         if self.video_capture:
             self.video_capture.stop()
@@ -515,6 +577,7 @@ async def main():
     parser.add_argument('--config', default='config.json', help='Configuration file path')
     parser.add_argument('--debug', action='store_true', help='Enable debug logging and window')
     parser.add_argument('--no-window', action='store_true', help='Run without debug window')
+    parser.add_argument('--daemon', action='store_true', help='Run in daemon mode (no window, with API/OSC servers)')
     parser.add_argument('--home', action='store_true', help='Move camera to home position and exit')
     parser.add_argument('--preset', type=int, help='Move camera to preset position and exit')
     
@@ -528,7 +591,8 @@ async def main():
     logger.info("Starting PTZ Camera Tracking System")
     
     # Create tracking system
-    show_debug = args.debug and not args.no_window
+    # In daemon mode, never show debug window
+    show_debug = args.debug and not args.no_window and not args.daemon
     system = PTZTrackingSystem(config, show_debug=show_debug)
     
     try:
@@ -550,9 +614,34 @@ async def main():
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
         
-        # Start tracking and run main loop
-        await system.start_tracking()
-        await system.run()
+        # In daemon mode, just keep servers alive without starting tracking
+        if args.daemon:
+            logger.info("Daemon mode: OSC server ready, waiting for commands...")
+            system.is_running = True
+            
+            # Start OSC command queue processing if OSC is enabled
+            osc_task = None
+            if system.osc_controller and system.osc_controller.enabled:
+                osc_task = asyncio.create_task(system.osc_controller.process_command_queue())
+            
+            # Lightweight daemon loop - just keep alive without video processing
+            try:
+                while system.is_running:
+                    await asyncio.sleep(1.0)  # Minimal resource usage
+            except KeyboardInterrupt:
+                logger.info("Daemon interrupted")
+            finally:
+                # Clean up OSC task
+                if osc_task:
+                    osc_task.cancel()
+                    try:
+                        await osc_task
+                    except asyncio.CancelledError:
+                        pass
+        else:
+            # Interactive mode: start tracking immediately
+            await system.start_tracking()
+            await system.run()
         
     except Exception as e:
         logger.error(f"Application error: {e}")

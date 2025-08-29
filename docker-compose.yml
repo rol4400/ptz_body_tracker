@@ -24,6 +24,8 @@ services:
     volumes:
       - ./config.json:/app/config.json:ro
       - ./logs:/app/logs
+      - ./main.py:/app/main.py:ro          # Bind mount main.py for development
+      - ./src:/app/src:ro                  # Bind mount source directory for development
       - /tmp/.X11-unix:/tmp/.X11-unix:rw  # For X11 if needed
     
     # Resource limits to prevent resource drain
@@ -31,7 +33,7 @@ services:
       resources:
         limits:
           cpus: '4.0'  # Increased for GPU workload
-          memory: 2G   # Increased for GPU operations
+          memory: 16G   # Increased for GPU operations
         reservations:
           cpus: '1.0'
           memory: 512M
@@ -42,7 +44,7 @@ services:
     
     # Health check
     healthcheck:
-      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.settimeout(5); s.connect(('localhost', 8080)); s.close()"]
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(5); s.connect(('localhost', 8081)); s.close()"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -89,9 +91,11 @@ services:
     volumes:
       - ./config.json:/app/config.json:rw
       - ./logs:/app/logs
+      - ./main.py:/app/main.py:ro          # Bind mount main.py for development
+      - ./src:/app/src:ro                  # Bind mount source directory for development
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
     
-    command: ["python", "main_clean.py", "--debug", "--config", "/app/config.json"]
+    command: ["python", "main.py", "--debug", "--config", "/app/config.json"]
     
     deploy:
       resources:
